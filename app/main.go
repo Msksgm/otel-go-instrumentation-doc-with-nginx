@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/riandyrn/otelchi"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
@@ -76,7 +77,13 @@ func getRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func getHello(w http.ResponseWriter, r *http.Request) {
-	ctx, span := tracer.Start(r.Context(), "getHello")
+	// span の作成。作成次に属性を設定可能
+	ctx, span := tracer.Start(r.Context(), "getHello", trace.WithAttributes(attribute.String("hello", "world")))
+	// さらに属性を追加することも可能
+	span.SetAttributes(attribute.Bool("isTrue", true), attribute.String("stringAttr", "hi!"))
+	// 属性のキーは、事前に定義されたものも利用できる
+	myKey := attribute.Key("myCoolAttribute")
+	span.SetAttributes(myKey.String("a value"))
 	defer span.End()
 
 	childHello(ctx)
