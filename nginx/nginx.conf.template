@@ -1,0 +1,31 @@
+load_module /usr/lib/nginx/modules/ngx_otel_module.so;
+
+user nginx;
+worker_processes auto;
+
+# main コンテキストで必要なら OS の CA を明示（任意。デフォルトは OS バンドル）
+# env NEW_RELIC_API_KEY;  # 変数で渡す場合はこれも検討
+
+events { worker_connections 1024; }
+
+http {
+  # --- OpenTelemetry to local otel-tui ---
+  otel_exporter {
+    # ローカルのotel-tuiエンドポイント（TLSなし）
+    endpoint ${OTLP_ENDPOINT};
+  }
+
+  otel_service_name nginx;
+  otel_trace on;
+
+  # 既存/下流とトレースをつなげたい場合は推奨
+  otel_trace_context propagate;
+
+  # 以下いつもの設定…
+  include /etc/nginx/mime.types;
+  default_type application/octet-stream;
+  access_log /var/log/nginx/access.log;
+  sendfile on; keepalive_timeout 65; gzip on;
+
+  include /etc/nginx/conf.d/*.conf;
+}

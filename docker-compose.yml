@@ -1,0 +1,39 @@
+services:
+  app:
+    image: golang:1.23
+    working_dir: /app
+    command: go run main.go
+    environment:
+      - OTLP_ENDPOINT=host.docker.internal:4317
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - type: bind
+        source: ${PWD}/app
+        target: /app
+
+  nginx:
+    image: nginx:1.27-bookworm-otel
+    ports:
+      - "${PUBLIC_PORT:-8080}:80"
+    depends_on:
+      app:
+        condition: service_started
+    environment:
+      - OTLP_ENDPOINT=host.docker.internal:4317
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - type: bind
+        source: ${PWD}/nginx/nginx.conf.template
+        target: /etc/nginx/nginx.conf.template
+      - type: bind
+        source: ${PWD}/nginx/docker-entrypoint.sh
+        target: /docker-entrypoint.sh
+      - type: bind
+        source: ${PWD}/nginx/conf.d
+        target: /etc/nginx/conf.d
+      - type: bind
+        source: ${PWD}/static
+        target: /usr/share/nginx/html
+    entrypoint: /docker-entrypoint.sh
