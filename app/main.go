@@ -13,6 +13,7 @@ import (
 	"github.com/riandyrn/otelchi"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
@@ -118,6 +119,13 @@ func getUserByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func getError(w http.ResponseWriter, r *http.Request) {
+	// span の作成。作成次に属性を設定可能
+	_, span := tracer.Start(r.Context(), "getError")
+	defer span.End()
+
+	// ステータスにエラーを設定。設定すると、このスパンだけでなく、トレース全体がエラーとして扱われる
+	span.SetStatus(codes.Error, "Internal Server Error")
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusInternalServerError)
 	data, _ := json.Marshal(map[string]string{
