@@ -76,8 +76,10 @@ func getRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func getHello(w http.ResponseWriter, r *http.Request) {
-	_, span := tracer.Start(r.Context(), "getHello")
+	ctx, span := tracer.Start(r.Context(), "getHello")
 	defer span.End()
+
+	childHello(ctx)
 
 	name := r.URL.Query().Get("name")
 	if name == "" {
@@ -87,6 +89,12 @@ func getHello(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	data, _ := json.Marshal(map[string]string{"message": fmt.Sprintf("Hello, %s!", name)})
 	w.Write(data)
+}
+
+func childHello(ctx context.Context) {
+	_, childSpan := tracer.Start(ctx, "childHello")
+	defer childSpan.End()
+	fmt.Println("This is a child function")
 }
 
 func getUserByID(w http.ResponseWriter, r *http.Request) {
