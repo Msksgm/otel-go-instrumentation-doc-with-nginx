@@ -76,6 +76,9 @@ func getRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func getHello(w http.ResponseWriter, r *http.Request) {
+	_, span := tracer.Start(r.Context(), "getHello")
+	defer span.End()
+
 	name := r.URL.Query().Get("name")
 	if name == "" {
 		name = "World"
