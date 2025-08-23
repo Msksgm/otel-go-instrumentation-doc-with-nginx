@@ -151,6 +151,7 @@ func main() {
 	defer func() { _ = tp.Shutdown(ctx) }()
 
 	otel.SetTracerProvider(tp)
+	// 伝搬を設定。nginx や他サービスとのトレースIDの受け渡しに利用できる
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	tracer = tp.Tracer("go-app")
