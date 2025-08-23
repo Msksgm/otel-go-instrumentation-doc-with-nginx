@@ -86,6 +86,9 @@ func getHello(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(myKey.String("a value"))
 	defer span.End()
 
+	// AddEvent により特定のタイミングで、Event を追加可能。mutex で排他処理をしているときや、特定の分岐に入る時などに利用できそう
+	span.AddEvent("Hello with AddEvent")
+
 	childHello(ctx)
 
 	name := r.URL.Query().Get("name")
@@ -101,6 +104,8 @@ func getHello(w http.ResponseWriter, r *http.Request) {
 func childHello(ctx context.Context) {
 	_, childSpan := tracer.Start(ctx, "childHello")
 	defer childSpan.End()
+
+	childSpan.AddEvent("Hello with AddEvent from child", trace.WithAttributes(attribute.String("childEvent", "hello child")))
 	fmt.Println("This is a child function")
 }
 
