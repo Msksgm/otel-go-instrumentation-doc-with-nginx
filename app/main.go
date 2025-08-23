@@ -125,6 +125,8 @@ func getError(w http.ResponseWriter, r *http.Request) {
 
 	// ステータスにエラーを設定。設定すると、このスパンだけでなく、トレース全体がエラーとして扱われる
 	span.SetStatus(codes.Error, "Internal Server Error")
+	// Event にエラー情報を追加する。このメソッドだけでは、トレース全体のステータスは変わらない（厳密には、直前のスパンまでエラーステータスになる）ため、span.SetStatus と合わせて使う
+	span.RecordError(fmt.Errorf("err: Internal Server Error"))
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusInternalServerError)
