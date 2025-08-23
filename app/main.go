@@ -117,6 +117,16 @@ func getUserByID(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func getError(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusInternalServerError)
+	data, _ := json.Marshal(map[string]string{
+		"error":   "Internal Server Error",
+		"message": "This is a sample 500 error endpoint for testing OpenTelemetry",
+	})
+	w.Write(data)
+}
+
 func main() {
 	// Initialize OpenTelemetry
 	ctx := context.Background()
@@ -145,6 +155,7 @@ func main() {
 	r.Get("/", getRoot)
 	r.Get("/hello", getHello)
 	r.Get("/users/{id}", getUserByID)
+	r.Get("/error", getError)
 
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
