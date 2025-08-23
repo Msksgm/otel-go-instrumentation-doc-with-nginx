@@ -11,8 +11,8 @@ events { worker_connections 1024; }
 http {
   # --- OpenTelemetry to local otel-tui ---
   otel_exporter {
-    # ローカルのotel-tuiエンドポイント（TLSなし）
-    endpoint ${OTLP_ENDPOINT};
+    # OTLP gRPC エンドポイント（環境変数から取得）
+    endpoint ${OTEL_EXPORTER_ENDPOINT};
   }
 
   otel_service_name nginx;

@@ -20,7 +20,7 @@ services:
       app:
         condition: service_started
     environment:
-      - OTLP_ENDPOINT=host.docker.internal:4317
+      - OTEL_EXPORTER_ENDPOINT=${OTEL_EXPORTER_ENDPOINT:-host.docker.internal:4317}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
