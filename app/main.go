@@ -14,16 +14,23 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.34.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
-var tracer trace.Tracer
+var (
+	tracer         trace.Tracer
+	meter          metric.Meter
+	requestCounter metric.Int64Counter
+)
 
 func newOTelTUIExporter(ctx context.Context) (*otlptrace.Exporter, error) {
 	// Get New OTel TUI endpoint from environment variable or use default
@@ -46,23 +53,54 @@ func newOTelTUIExporter(ctx context.Context) (*otlptrace.Exporter, error) {
 	return exporter, nil
 }
 
-func newTracerProvider(exp sdktrace.SpanExporter) *sdktrace.TracerProvider {
-	// Create resource with service information
-	res, err := resource.Merge(
+func newOTelMetricExporter(ctx context.Context) (sdkmetric.Exporter, error) {
+	// Get OTLP endpoint from environment variable
+	endpoint := os.Getenv("OTLP_ENDPOINT")
+	if endpoint == "" {
+		return nil, fmt.Errorf("OTLP_ENDPOINT environment variable is required")
+	}
+
+	log.Printf("Initializing OpenTelemetry Metrics with OTLP endpoint: %s", endpoint)
+
+	// Create OTLP metric exporter
+	exporter, err := otlpmetricgrpc.New(ctx,
+		otlpmetricgrpc.WithEndpoint(endpoint),
+		otlpmetricgrpc.WithInsecure(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create metric exporter: %w", err)
+	}
+
+	return exporter, nil
+}
+
+// Create resource with service information
+func newResource() (*resource.Resource, error) {
+	return resource.Merge(
 		resource.Default(),
 		resource.NewWithAttributes(
 			semconv.SchemaURL,
 			semconv.ServiceName("go-app"),
 		),
 	)
-	if err != nil {
-		panic(err)
-	}
+}
 
+func newTracerProvider(exp sdktrace.SpanExporter, res *resource.Resource) *sdktrace.TracerProvider {
 	// Create TracerProvider
 	return sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exp),
 		sdktrace.WithResource(res),
+	)
+}
+
+func newMeterProvider(metricExporter sdkmetric.Exporter, res *resource.Resource) *sdkmetric.MeterProvider {
+	return sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(
+			sdkmetric.NewPeriodicReader(metricExporter,
+				// デモ目的で3sに設定（デフォルトは1m）
+				sdkmetric.WithInterval(3*time.Second)),
+		),
 	)
 }
 
@@ -89,6 +127,15 @@ func getHello(w http.ResponseWriter, r *http.Request) {
 
 	// AddEvent により特定のタイミングで、Event を追加可能。mutex で排他処理をしているときや、特定の分岐に入る時などに利用できそう
 	span.AddEvent("Hello with AddEvent")
+
+	// メトリクスをカウント
+	if requestCounter != nil {
+		requestCounter.Add(r.Context(), 1, metric.WithAttributes(
+			attribute.String("endpoint", "/hello"),
+			attribute.String("method", r.Method),
+		))
+		log.Printf("Incremented request counter for /hello endpoint")
+	}
 
 	childHello(ctx)
 
@@ -146,15 +193,46 @@ func main() {
 		log.Fatalf("failed to create exporter: %v", err)
 	}
 
-	tp := newTracerProvider(exp)
+	metricExp, err := newOTelMetricExporter(ctx)
+	if err != nil {
+		log.Fatalf("failed to create metric exporter: %v", err)
+	}
+
+	res, err := newResource()
+	if err != nil {
+		log.Fatalf("failed to create resource: %v", err)
+	}
+
+	tp := newTracerProvider(exp, res)
 
 	defer func() { _ = tp.Shutdown(ctx) }()
 
 	otel.SetTracerProvider(tp)
 	// 伝搬を設定。nginx や他サービスとのトレースIDの受け渡しに利用できる
 	otel.SetTextMapPropagator(propagation.TraceContext{})
+	mp := newMeterProvider(metricExp, res)
+	defer func() {
+		log.Printf("Shutting down meter provider...")
+		if err := mp.Shutdown(ctx); err != nil {
+			log.Fatalf("failed to shutdown meter provider: %v", err)
+		}
+		log.Printf("Meter provider shutdown complete")
+	}()
+	otel.SetMeterProvider(mp)
 
 	tracer = tp.Tracer("go-app")
+
+	// メトリクスカウンターを作成
+	meter = otel.Meter("go-app")
+	requestCounter, err = meter.Int64Counter(
+		"api.counter",
+		metric.WithDescription("Number of API calls"),
+		metric.WithUnit("{call}"),
+	)
+	if err != nil {
+		log.Fatalf("failed to create request counter: %v", err)
+	}
+	log.Printf("Request counter created successfully")
 
 	// Create chi router
 	r := chi.NewRouter()
