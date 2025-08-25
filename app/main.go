@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"time"
@@ -27,10 +28,12 @@ import (
 )
 
 var (
-	tracer         trace.Tracer
-	meter          metric.Meter
-	requestCounter metric.Int64Counter
-	itemsCounter   metric.Int64UpDownCounter
+	tracer              trace.Tracer
+	meter               metric.Meter
+	requestCounter      metric.Int64Counter
+	itemsCounter        metric.Int64UpDownCounter
+	fanSpeedSubsciption chan int64
+	speedGauge          metric.Int64Gauge
 )
 
 func newOTelTUIExporter(ctx context.Context) (*otlptrace.Exporter, error) {
@@ -223,6 +226,46 @@ func removeItem(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func getCPUFanSpeedHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, span := tracer.Start(r.Context(), "getCPUFanSpeed")
+	defer span.End()
+
+	// fanSpeedSubsciptionから最新の値を非ブロッキングで取得
+	var fanSpeed int64
+	select {
+	case speed, ok := <-fanSpeedSubsciption:
+		if ok {
+			fanSpeed = speed
+			// Gaugeメトリクスを記録
+			if speedGauge != nil {
+				speedGauge.Record(ctx, fanSpeed)
+				log.Printf("Recorded fan speed: %d rpm", fanSpeed)
+			}
+		} else {
+			// チャンネルがクローズされている場合はランダムな値を生成
+			fanSpeed = int64(1500 + rand.Intn(1000))
+			if speedGauge != nil {
+				speedGauge.Record(ctx, fanSpeed)
+			}
+		}
+	default:
+		// チャンネルに値がない場合はランダムな値を生成
+		fanSpeed = int64(1500 + rand.Intn(1000))
+		if speedGauge != nil {
+			speedGauge.Record(ctx, fanSpeed)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(map[string]interface{}{
+		"fanSpeed": fanSpeed,
+		"unit":     "rpm",
+		"message":  "Current CPU fan speed",
+	})
+	w.Write(data)
+}
+
 func main() {
 	// Initialize OpenTelemetry
 	ctx := context.Background()
@@ -282,6 +325,32 @@ func main() {
 		log.Fatalf("failed to create items counter: %v", err)
 	}
 
+	speedGauge, err = meter.Int64Gauge(
+		"cpu.fan.speed",
+		metric.WithDescription("CPU Fan Speed"),
+		metric.WithUnit("{rpm}"),
+	)
+	if err != nil {
+		log.Fatalf("failed to create speed gauge: %v", err)
+	}
+
+	getCPUFanSpeed := func() int64 {
+		// デモンストレーション目的でランダムなファン速度を生成します
+		// 実際のアプリケーションでは、これを実際のファン速度を取得するように置き換えてください
+		return int64(1500 + rand.Intn(1000))
+	}
+
+	fanSpeedSubsciption = make(chan int64, 1)
+	go func() {
+		defer close(fanSpeedSubsciption)
+
+		for idx := 0; idx < 5; idx++ {
+			time.Sleep(time.Duration(rand.Intn(3)) * time.Second)
+			fanSpeed := getCPUFanSpeed()
+			fanSpeedSubsciption <- fanSpeed
+		}
+	}()
+
 	// Create chi router
 	r := chi.NewRouter()
 
@@ -295,6 +364,7 @@ func main() {
 	r.Get("/error", getError)
 	r.Post("/items/add", addItem)
 	r.Post("/items/remove", removeItem)
+	r.Get("/cpu/fanspeed", getCPUFanSpeedHandler)
 
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
