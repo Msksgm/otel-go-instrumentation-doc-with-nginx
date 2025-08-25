@@ -30,6 +30,7 @@ var (
 	tracer         trace.Tracer
 	meter          metric.Meter
 	requestCounter metric.Int64Counter
+	itemsCounter   metric.Int64UpDownCounter
 )
 
 func newOTelTUIExporter(ctx context.Context) (*otlptrace.Exporter, error) {
@@ -184,6 +185,44 @@ func getError(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func addItem(w http.ResponseWriter, r *http.Request) {
+	ctx, span := tracer.Start(r.Context(), "addItem")
+	defer span.End()
+
+	// itemsCounterをインクリメント
+	if itemsCounter != nil {
+		itemsCounter.Add(ctx, 1)
+		log.Printf("Incremented items counter")
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(map[string]string{
+		"message": "Item added successfully",
+		"action":  "increment",
+	})
+	w.Write(data)
+}
+
+func removeItem(w http.ResponseWriter, r *http.Request) {
+	ctx, span := tracer.Start(r.Context(), "removeItem")
+	defer span.End()
+
+	// itemsCounterをデクリメント
+	if itemsCounter != nil {
+		itemsCounter.Add(ctx, -1)
+		log.Printf("Decremented items counter")
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(map[string]string{
+		"message": "Item removed successfully",
+		"action":  "decrement",
+	})
+	w.Write(data)
+}
+
 func main() {
 	// Initialize OpenTelemetry
 	ctx := context.Background()
@@ -234,6 +273,15 @@ func main() {
 	}
 	log.Printf("Request counter created successfully")
 
+	itemsCounter, err = meter.Int64UpDownCounter(
+		"items.counter",
+		metric.WithDescription("Number of items."),
+		metric.WithUnit("{item}"),
+	)
+	if err != nil {
+		log.Fatalf("failed to create items counter: %v", err)
+	}
+
 	// Create chi router
 	r := chi.NewRouter()
 
@@ -245,6 +293,8 @@ func main() {
 	r.Get("/hello", getHello)
 	r.Get("/users/{id}", getUserByID)
 	r.Get("/error", getError)
+	r.Post("/items/add", addItem)
+	r.Post("/items/remove", removeItem)
 
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
