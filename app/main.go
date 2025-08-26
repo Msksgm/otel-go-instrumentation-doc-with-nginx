@@ -34,6 +34,7 @@ var (
 	itemsCounter        metric.Int64UpDownCounter
 	fanSpeedSubsciption chan int64
 	speedGauge          metric.Int64Gauge
+	histogram           metric.Float64Histogram
 )
 
 func newOTelTUIExporter(ctx context.Context) (*otlptrace.Exporter, error) {
@@ -266,6 +267,73 @@ func getCPUFanSpeedHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func callExternalAPI(w http.ResponseWriter, r *http.Request) {
+	ctx, span := tracer.Start(r.Context(), "callExternalAPI")
+	defer span.End()
+
+	// 処理開始時刻を記録
+	startTime := time.Now()
+	
+	// 外部APIコールをエミュレート（50ms～10秒のランダムな遅延、より分散させる）
+	// 50% : 50ms - 1秒 (高速レスポンス)
+	// 30% : 1秒 - 5秒 (中程度のレスポンス)
+	// 20% : 5秒 - 10秒 (遅いレスポンス)
+	var apiLatency time.Duration
+	randValue := rand.Float32()
+	if randValue < 0.5 {
+		// 50ms - 1000ms
+		apiLatency = time.Duration(50+rand.Intn(950)) * time.Millisecond
+	} else if randValue < 0.8 {
+		// 1秒 - 5秒
+		apiLatency = time.Duration(1000+rand.Intn(4000)) * time.Millisecond
+	} else {
+		// 5秒 - 10秒
+		apiLatency = time.Duration(5000+rand.Intn(5000)) * time.Millisecond
+	}
+	
+	// スパンに属性を追加
+	span.SetAttributes(
+		attribute.String("api.endpoint", "https://api.example.com/data"),
+		attribute.String("api.method", "GET"),
+		attribute.Int64("api.latency_ms", int64(apiLatency.Milliseconds())),
+	)
+	
+	// 外部APIコールの開始をイベントとして記録
+	span.AddEvent("External API call started", trace.WithAttributes(
+		attribute.String("api.url", "https://api.example.com/data"),
+	))
+	
+	// 外部APIコールをエミュレート
+	time.Sleep(apiLatency)
+	
+	// 外部APIコールの完了をイベントとして記録
+	span.AddEvent("External API call completed", trace.WithAttributes(
+		attribute.Int("api.status_code", 200),
+	))
+	
+	// 処理時間を計測
+	duration := time.Since(startTime).Seconds()
+	
+	// ヒストグラムメトリクスに記録
+	if histogram != nil {
+		histogram.Record(ctx, duration, metric.WithAttributes(
+			attribute.String("api.endpoint", "external_api"),
+			attribute.Int("api.status_code", 200),
+		))
+		log.Printf("Recorded API call duration: %.3fs", duration)
+	}
+	
+	// レスポンスを返す
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(map[string]interface{}{
+		"message":     "External API call completed successfully",
+		"duration_ms": apiLatency.Milliseconds(),
+		"status":      "success",
+	})
+	w.Write(data)
+}
+
 func main() {
 	// Initialize OpenTelemetry
 	ctx := context.Background()
@@ -351,6 +419,15 @@ func main() {
 		}
 	}()
 
+	histogram, err = meter.Float64Histogram(
+		"task.duration",
+		metric.WithDescription("The duration of task execution."),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
 	// Create chi router
 	r := chi.NewRouter()
 
@@ -365,6 +442,7 @@ func main() {
 	r.Post("/items/add", addItem)
 	r.Post("/items/remove", removeItem)
 	r.Get("/cpu/fanspeed", getCPUFanSpeedHandler)
+	r.Get("/external-api", callExternalAPI)
 
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
