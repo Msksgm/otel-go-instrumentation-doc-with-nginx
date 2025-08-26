@@ -35,6 +35,8 @@ var (
 	fanSpeedSubsciption chan int64
 	speedGauge          metric.Int64Gauge
 	histogram           metric.Float64Histogram
+	memoryObservable    metric.Float64ObservableCounter
+	currentMemoryUsage  float64
 )
 
 func newOTelTUIExporter(ctx context.Context) (*otlptrace.Exporter, error) {
@@ -334,6 +336,21 @@ func callExternalAPI(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func getMemoryMetrics(w http.ResponseWriter, r *http.Request) {
+	_, span := tracer.Start(r.Context(), "getMemoryMetrics")
+	defer span.End()
+
+	// 現在のメモリ使用量を返す（ObservableCounterによって自動的に収集されている値）
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(map[string]interface{}{
+		"current_memory_bytes": currentMemoryUsage,
+		"unit":                 "bytes",
+		"message":              "Current memory usage tracked by Observable Counter",
+	})
+	w.Write(data)
+}
+
 func main() {
 	// Initialize OpenTelemetry
 	ctx := context.Background()
@@ -428,6 +445,28 @@ func main() {
 		panic(err)
 	}
 
+	// Float64ObservableCounterを作成
+	memoryObservable, err = meter.Float64ObservableCounter(
+		"memory.usage",
+		metric.WithDescription("Current memory usage in bytes"),
+		metric.WithUnit("By"),
+		metric.WithFloat64Callback(func(ctx context.Context, o metric.Float64Observer) error {
+			// デモンストレーション目的でランダムな値を生成
+			// 実際のアプリケーションでは、実際のメモリ使用量を取得するように置き換えてください
+			// 100MB〜500MBの間でランダムに増加する値をシミュレート
+			currentMemoryUsage = float64(100*1024*1024) + float64(rand.Intn(400*1024*1024))
+			o.Observe(currentMemoryUsage, metric.WithAttributes(
+				attribute.String("memory.type", "heap"),
+			))
+			log.Printf("Observable Counter reported memory usage: %.2f MB", currentMemoryUsage/(1024*1024))
+			return nil
+		}),
+	)
+	if err != nil {
+		log.Fatalf("failed to create memory observable counter: %v", err)
+	}
+	log.Printf("Memory observable counter created successfully")
+
 	// Create chi router
 	r := chi.NewRouter()
 
@@ -443,6 +482,7 @@ func main() {
 	r.Post("/items/remove", removeItem)
 	r.Get("/cpu/fanspeed", getCPUFanSpeedHandler)
 	r.Get("/external-api", callExternalAPI)
+	r.Get("/metrics/memory", getMemoryMetrics)
 
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
