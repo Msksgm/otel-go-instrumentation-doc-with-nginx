@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -28,15 +29,18 @@ import (
 )
 
 var (
-	tracer              trace.Tracer
-	meter               metric.Meter
-	requestCounter      metric.Int64Counter
-	itemsCounter        metric.Int64UpDownCounter
-	fanSpeedSubsciption chan int64
-	speedGauge          metric.Int64Gauge
-	histogram           metric.Float64Histogram
-	memoryObservable    metric.Float64ObservableCounter
-	currentMemoryUsage  float64
+	tracer                   trace.Tracer
+	meter                    metric.Meter
+	requestCounter           metric.Int64Counter
+	itemsCounter             metric.Int64UpDownCounter
+	fanSpeedSubsciption      chan int64
+	speedGauge               metric.Int64Gauge
+	histogram                metric.Float64Histogram
+	memoryObservable         metric.Float64ObservableCounter
+	currentMemoryUsage       float64
+	connectionObservable     metric.Int64ObservableUpDownCounter
+	activeConnections        int64
+	activeConnectionsMutex   sync.Mutex
 )
 
 func newOTelTUIExporter(ctx context.Context) (*otlptrace.Exporter, error) {
@@ -351,6 +355,71 @@ func getMemoryMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func getConnectionMetrics(w http.ResponseWriter, r *http.Request) {
+	_, span := tracer.Start(r.Context(), "getConnectionMetrics")
+	defer span.End()
+
+	// 現在のアクティブコネクション数を返す
+	activeConnectionsMutex.Lock()
+	connections := activeConnections
+	activeConnectionsMutex.Unlock()
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(map[string]interface{}{
+		"active_connections": connections,
+		"unit":               "connections",
+		"message":            "Active connections tracked by Observable UpDownCounter",
+	})
+	w.Write(data)
+}
+
+func simulateConnect(w http.ResponseWriter, r *http.Request) {
+	_, span := tracer.Start(r.Context(), "simulateConnect")
+	defer span.End()
+
+	// コネクションを増やす
+	activeConnectionsMutex.Lock()
+	activeConnections++
+	connections := activeConnections
+	activeConnectionsMutex.Unlock()
+
+	log.Printf("Connection opened, total: %d", connections)
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(map[string]interface{}{
+		"action":             "connect",
+		"active_connections": connections,
+		"message":            "Connection opened",
+	})
+	w.Write(data)
+}
+
+func simulateDisconnect(w http.ResponseWriter, r *http.Request) {
+	_, span := tracer.Start(r.Context(), "simulateDisconnect")
+	defer span.End()
+
+	// コネクションを減らす
+	activeConnectionsMutex.Lock()
+	if activeConnections > 0 {
+		activeConnections--
+	}
+	connections := activeConnections
+	activeConnectionsMutex.Unlock()
+
+	log.Printf("Connection closed, total: %d", connections)
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(map[string]interface{}{
+		"action":             "disconnect",
+		"active_connections": connections,
+		"message":            "Connection closed",
+	})
+	w.Write(data)
+}
+
 func main() {
 	// Initialize OpenTelemetry
 	ctx := context.Background()
@@ -467,6 +536,47 @@ func main() {
 	}
 	log.Printf("Memory observable counter created successfully")
 
+	// Int64ObservableUpDownCounterを作成
+	connectionObservable, err = meter.Int64ObservableUpDownCounter(
+		"active.connections",
+		metric.WithDescription("Number of active connections"),
+		metric.WithUnit("{connection}"),
+		metric.WithInt64Callback(func(ctx context.Context, o metric.Int64Observer) error {
+			activeConnectionsMutex.Lock()
+			connections := activeConnections
+			activeConnectionsMutex.Unlock()
+			
+			o.Observe(connections, metric.WithAttributes(
+				attribute.String("connection.type", "http"),
+			))
+			log.Printf("Observable UpDownCounter reported active connections: %d", connections)
+			return nil
+		}),
+	)
+	if err != nil {
+		log.Fatalf("failed to create connection observable updown counter: %v", err)
+	}
+	log.Printf("Connection observable updown counter created successfully")
+
+	// バックグラウンドでコネクション数をシミュレート
+	go func() {
+		for {
+			time.Sleep(time.Duration(2+rand.Intn(3)) * time.Second)
+			activeConnectionsMutex.Lock()
+			// -5〜+10の間でランダムに変動
+			change := int64(rand.Intn(16) - 5)
+			activeConnections += change
+			if activeConnections < 0 {
+				activeConnections = 0
+			}
+			if activeConnections > 100 {
+				activeConnections = 100
+			}
+			activeConnectionsMutex.Unlock()
+			log.Printf("Simulated connection change: %+d, total: %d", change, activeConnections)
+		}
+	}()
+
 	// Create chi router
 	r := chi.NewRouter()
 
@@ -483,6 +593,9 @@ func main() {
 	r.Get("/cpu/fanspeed", getCPUFanSpeedHandler)
 	r.Get("/external-api", callExternalAPI)
 	r.Get("/metrics/memory", getMemoryMetrics)
+	r.Get("/metrics/connections", getConnectionMetrics)
+	r.Post("/connection/open", simulateConnect)
+	r.Post("/connection/close", simulateDisconnect)
 
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
