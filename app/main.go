@@ -41,6 +41,9 @@ var (
 	connectionObservable     metric.Int64ObservableUpDownCounter
 	activeConnections        int64
 	activeConnectionsMutex   sync.Mutex
+	heapObservable           metric.Int64ObservableGauge
+	currentHeapUsage         int64
+	heapUsageMutex           sync.Mutex
 )
 
 func newOTelTUIExporter(ctx context.Context) (*otlptrace.Exporter, error) {
@@ -420,6 +423,84 @@ func simulateDisconnect(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func getHeapMetrics(w http.ResponseWriter, r *http.Request) {
+	_, span := tracer.Start(r.Context(), "getHeapMetrics")
+	defer span.End()
+
+	// 現在のヒープメモリ使用量を返す
+	heapUsageMutex.Lock()
+	heapUsage := currentHeapUsage
+	heapUsageMutex.Unlock()
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(map[string]interface{}{
+		"heap_bytes": heapUsage,
+		"heap_mb":    float64(heapUsage) / (1024 * 1024),
+		"unit":       "bytes",
+		"message":    "Heap memory usage tracked by Observable Gauge",
+	})
+	w.Write(data)
+}
+
+func allocateMemory(w http.ResponseWriter, r *http.Request) {
+	_, span := tracer.Start(r.Context(), "allocateMemory")
+	defer span.End()
+
+	// メモリを割り当てる（10MB〜50MBのランダムな量）
+	allocation := int64(10*1024*1024) + int64(rand.Intn(40*1024*1024))
+	
+	heapUsageMutex.Lock()
+	currentHeapUsage += allocation
+	if currentHeapUsage > 500*1024*1024 {
+		currentHeapUsage = 500 * 1024 * 1024
+	}
+	heapUsage := currentHeapUsage
+	heapUsageMutex.Unlock()
+
+	log.Printf("Memory allocated: %.2f MB, total heap: %.2f MB", 
+		float64(allocation)/(1024*1024), float64(heapUsage)/(1024*1024))
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(map[string]interface{}{
+		"action":      "allocate",
+		"allocated_mb": float64(allocation) / (1024 * 1024),
+		"total_heap_mb": float64(heapUsage) / (1024 * 1024),
+		"message":     "Memory allocated",
+	})
+	w.Write(data)
+}
+
+func freeMemory(w http.ResponseWriter, r *http.Request) {
+	_, span := tracer.Start(r.Context(), "freeMemory")
+	defer span.End()
+
+	// メモリを解放する（10MB〜50MBのランダムな量）
+	deallocation := int64(10*1024*1024) + int64(rand.Intn(40*1024*1024))
+	
+	heapUsageMutex.Lock()
+	currentHeapUsage -= deallocation
+	if currentHeapUsage < 10*1024*1024 {
+		currentHeapUsage = 10 * 1024 * 1024
+	}
+	heapUsage := currentHeapUsage
+	heapUsageMutex.Unlock()
+
+	log.Printf("Memory freed: %.2f MB, total heap: %.2f MB", 
+		float64(deallocation)/(1024*1024), float64(heapUsage)/(1024*1024))
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(map[string]interface{}{
+		"action":      "free",
+		"freed_mb":    float64(deallocation) / (1024 * 1024),
+		"total_heap_mb": float64(heapUsage) / (1024 * 1024),
+		"message":     "Memory freed",
+	})
+	w.Write(data)
+}
+
 func main() {
 	// Initialize OpenTelemetry
 	ctx := context.Background()
@@ -577,6 +658,52 @@ func main() {
 		}
 	}()
 
+	// Int64ObservableGaugeを作成
+	heapObservable, err = meter.Int64ObservableGauge(
+		"memory.heap",
+		metric.WithDescription("Heap memory usage in bytes"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(func(ctx context.Context, o metric.Int64Observer) error {
+			heapUsageMutex.Lock()
+			heapUsage := currentHeapUsage
+			heapUsageMutex.Unlock()
+			
+			o.Observe(heapUsage, metric.WithAttributes(
+				attribute.String("memory.state", "used"),
+			))
+			log.Printf("Observable Gauge reported heap usage: %.2f MB", float64(heapUsage)/(1024*1024))
+			return nil
+		}),
+	)
+	if err != nil {
+		log.Fatalf("failed to create heap observable gauge: %v", err)
+	}
+	log.Printf("Heap observable gauge created successfully")
+
+	// ヒープメモリ使用量の初期値を設定（50MB〜200MBの範囲）
+	currentHeapUsage = int64(50*1024*1024) + int64(rand.Intn(150*1024*1024))
+
+	// バックグラウンドでヒープメモリ使用量をシミュレート
+	go func() {
+		for {
+			time.Sleep(time.Duration(1+rand.Intn(3)) * time.Second)
+			heapUsageMutex.Lock()
+			// メモリ使用量を変動させる（-10MB〜+20MBの範囲）
+			change := int64(rand.Intn(30*1024*1024) - 10*1024*1024)
+			currentHeapUsage += change
+			// 最小値と最大値の制限（10MB〜500MB）
+			if currentHeapUsage < 10*1024*1024 {
+				currentHeapUsage = 10 * 1024 * 1024
+			}
+			if currentHeapUsage > 500*1024*1024 {
+				currentHeapUsage = 500 * 1024 * 1024
+			}
+			heapUsageMutex.Unlock()
+			log.Printf("Simulated heap memory change: %+.2f MB, total: %.2f MB", 
+				float64(change)/(1024*1024), float64(currentHeapUsage)/(1024*1024))
+		}
+	}()
+
 	// Create chi router
 	r := chi.NewRouter()
 
@@ -596,6 +723,9 @@ func main() {
 	r.Get("/metrics/connections", getConnectionMetrics)
 	r.Post("/connection/open", simulateConnect)
 	r.Post("/connection/close", simulateDisconnect)
+	r.Get("/metrics/heap", getHeapMetrics)
+	r.Post("/memory/allocate", allocateMemory)
+	r.Post("/memory/free", freeMemory)
 
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
