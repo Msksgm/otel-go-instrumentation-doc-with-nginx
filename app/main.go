@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"os"
@@ -13,15 +14,18 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/riandyrn/otelchi"
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -89,6 +93,27 @@ func newOTelMetricExporter(ctx context.Context) (sdkmetric.Exporter, error) {
 	return exporter, nil
 }
 
+func newOTelLogExporter(ctx context.Context) (sdklog.Exporter, error) {
+	// Get OTLP endpoint from environment variable
+	endpoint := os.Getenv("OTLP_ENDPOINT")
+	if endpoint == "" {
+		return nil, fmt.Errorf("OTLP_ENDPOINT environment variable is required")
+	}
+
+	log.Printf("Initializing OpenTelemetry Log with OTLP endpoint: %s", endpoint)
+
+	// Create OTLP log exporter
+	exporter, err := otlploggrpc.New(ctx,
+		otlploggrpc.WithEndpoint(endpoint),
+		otlploggrpc.WithInsecure(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create metric exporter: %w", err)
+	}
+
+	return exporter, nil
+}
+
 // Create resource with service information
 func newResource() (*resource.Resource, error) {
 	return resource.Merge(
@@ -128,6 +153,14 @@ func newMeterProvider(metricExporter sdkmetric.Exporter, res *resource.Resource)
 	)
 }
 
+func newLoggerProvider(exp sdklog.Exporter, res *resource.Resource) *sdklog.LoggerProvider {
+	processor := sdklog.NewBatchProcessor(exp)
+	return sdklog.NewLoggerProvider(
+		sdklog.WithResource(res),
+		sdklog.WithProcessor(processor),
+	)
+}
+
 func getHealtz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -158,7 +191,7 @@ func getHello(w http.ResponseWriter, r *http.Request) {
 			attribute.String("endpoint", "/hello"),
 			attribute.String("method", r.Method),
 		))
-		log.Printf("Incremented request counter for /hello endpoint")
+		slog.Info("Incremented request counter for /hello endpoint")
 	}
 
 	childHello(ctx)
@@ -215,7 +248,7 @@ func addItem(w http.ResponseWriter, r *http.Request) {
 	// itemsCounterをインクリメント
 	if itemsCounter != nil {
 		itemsCounter.Add(ctx, 1)
-		log.Printf("Incremented items counter")
+		slog.Info("Incremented items counter")
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -234,7 +267,7 @@ func removeItem(w http.ResponseWriter, r *http.Request) {
 	// itemsCounterをデクリメント
 	if itemsCounter != nil {
 		itemsCounter.Add(ctx, -1)
-		log.Printf("Decremented items counter")
+		slog.Info("Decremented items counter")
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -259,7 +292,7 @@ func getCPUFanSpeedHandler(w http.ResponseWriter, r *http.Request) {
 			// Gaugeメトリクスを記録
 			if speedGauge != nil {
 				speedGauge.Record(ctx, fanSpeed)
-				log.Printf("Recorded fan speed: %d rpm", fanSpeed)
+				slog.Info("Recorded fan speed", "speed_rpm", fanSpeed)
 			}
 		} else {
 			// チャンネルがクローズされている場合はランダムな値を生成
@@ -339,7 +372,7 @@ func callExternalAPI(w http.ResponseWriter, r *http.Request) {
 			attribute.String("api.endpoint", "external_api"),
 			attribute.Int("api.status_code", 200),
 		))
-		log.Printf("Recorded API call duration: %.3fs", duration)
+		slog.Info("Recorded API call duration", "duration_seconds", duration)
 	}
 
 	// レスポンスを返す
@@ -397,7 +430,7 @@ func simulateConnect(w http.ResponseWriter, r *http.Request) {
 	connections := activeConnections
 	activeConnectionsMutex.Unlock()
 
-	log.Printf("Connection opened, total: %d", connections)
+	slog.Info("Connection opened", "total_connections", connections)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -421,7 +454,7 @@ func simulateDisconnect(w http.ResponseWriter, r *http.Request) {
 	connections := activeConnections
 	activeConnectionsMutex.Unlock()
 
-	log.Printf("Connection closed, total: %d", connections)
+	slog.Info("Connection closed", "total_connections", connections)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -468,8 +501,9 @@ func allocateMemory(w http.ResponseWriter, r *http.Request) {
 	heapUsage := currentHeapUsage
 	heapUsageMutex.Unlock()
 
-	log.Printf("Memory allocated: %.2f MB, total heap: %.2f MB",
-		float64(allocation)/(1024*1024), float64(heapUsage)/(1024*1024))
+	slog.Info("Memory allocated",
+		"allocated_mb", float64(allocation)/(1024*1024),
+		"total_heap_mb", float64(heapUsage)/(1024*1024))
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -497,8 +531,9 @@ func freeMemory(w http.ResponseWriter, r *http.Request) {
 	heapUsage := currentHeapUsage
 	heapUsageMutex.Unlock()
 
-	log.Printf("Memory freed: %.2f MB, total heap: %.2f MB",
-		float64(deallocation)/(1024*1024), float64(heapUsage)/(1024*1024))
+	slog.Info("Memory freed",
+		"freed_mb", float64(deallocation)/(1024*1024),
+		"total_heap_mb", float64(heapUsage)/(1024*1024))
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -525,6 +560,11 @@ func main() {
 		log.Fatalf("failed to create metric exporter: %v", err)
 	}
 
+	logExp, err := newOTelLogExporter(ctx)
+	if err != nil {
+		log.Fatalf("failed to create log exporter: %v", err)
+	}
+
 	res, err := newResource()
 	if err != nil {
 		log.Fatalf("failed to create resource: %v", err)
@@ -546,6 +586,20 @@ func main() {
 		log.Printf("Meter provider shutdown complete")
 	}()
 	otel.SetMeterProvider(mp)
+
+	// ログプロバイダーを初期化
+	lp := newLoggerProvider(logExp, res)
+	defer func() {
+		log.Printf("Shutting down logger provider...")
+		if err := lp.Shutdown(ctx); err != nil {
+			log.Fatalf("failed to shutdown logger provider: %v", err)
+		}
+		log.Printf("Logger provider shutdown complete")
+	}()
+
+	// slogとOpenTelemetryのブリッジを設定
+	logger := otelslog.NewLogger("go-app", otelslog.WithLoggerProvider(lp))
+	slog.SetDefault(logger)
 
 	tracer = tp.Tracer("go-app")
 
