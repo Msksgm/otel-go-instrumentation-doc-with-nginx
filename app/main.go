@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/instrumentation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -29,21 +30,21 @@ import (
 )
 
 var (
-	tracer                   trace.Tracer
-	meter                    metric.Meter
-	requestCounter           metric.Int64Counter
-	itemsCounter             metric.Int64UpDownCounter
-	fanSpeedSubsciption      chan int64
-	speedGauge               metric.Int64Gauge
-	histogram                metric.Float64Histogram
-	memoryObservable         metric.Float64ObservableCounter
-	currentMemoryUsage       float64
-	connectionObservable     metric.Int64ObservableUpDownCounter
-	activeConnections        int64
-	activeConnectionsMutex   sync.Mutex
-	heapObservable           metric.Int64ObservableGauge
-	currentHeapUsage         int64
-	heapUsageMutex           sync.Mutex
+	tracer                 trace.Tracer
+	meter                  metric.Meter
+	requestCounter         metric.Int64Counter
+	itemsCounter           metric.Int64UpDownCounter
+	fanSpeedSubsciption    chan int64
+	speedGauge             metric.Int64Gauge
+	histogram              metric.Float64Histogram
+	memoryObservable       metric.Float64ObservableCounter
+	currentMemoryUsage     float64
+	connectionObservable   metric.Int64ObservableUpDownCounter
+	activeConnections      int64
+	activeConnectionsMutex sync.Mutex
+	heapObservable         metric.Int64ObservableGauge
+	currentHeapUsage       int64
+	heapUsageMutex         sync.Mutex
 )
 
 func newOTelTUIExporter(ctx context.Context) (*otlptrace.Exporter, error) {
@@ -108,7 +109,16 @@ func newTracerProvider(exp sdktrace.SpanExporter, res *resource.Resource) *sdktr
 }
 
 func newMeterProvider(metricExporter sdkmetric.Exporter, res *resource.Resource) *sdkmetric.MeterProvider {
+	// task.duration ヒストグラムの名前を request.latency に変更するビュー
+	view := sdkmetric.NewView(sdkmetric.Instrument{
+		Name: "task.duration",
+		Scope: instrumentation.Scope{
+			Name: "go-app",
+		},
+	}, sdkmetric.Stream{Name: "request.latency"})
+
 	return sdkmetric.NewMeterProvider(
+		sdkmetric.WithView(view),
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(
 			sdkmetric.NewPeriodicReader(metricExporter,
@@ -282,7 +292,7 @@ func callExternalAPI(w http.ResponseWriter, r *http.Request) {
 
 	// 処理開始時刻を記録
 	startTime := time.Now()
-	
+
 	// 外部APIコールをエミュレート（50ms～10秒のランダムな遅延、より分散させる）
 	// 50% : 50ms - 1秒 (高速レスポンス)
 	// 30% : 1秒 - 5秒 (中程度のレスポンス)
@@ -299,30 +309,30 @@ func callExternalAPI(w http.ResponseWriter, r *http.Request) {
 		// 5秒 - 10秒
 		apiLatency = time.Duration(5000+rand.Intn(5000)) * time.Millisecond
 	}
-	
+
 	// スパンに属性を追加
 	span.SetAttributes(
 		attribute.String("api.endpoint", "https://api.example.com/data"),
 		attribute.String("api.method", "GET"),
 		attribute.Int64("api.latency_ms", int64(apiLatency.Milliseconds())),
 	)
-	
+
 	// 外部APIコールの開始をイベントとして記録
 	span.AddEvent("External API call started", trace.WithAttributes(
 		attribute.String("api.url", "https://api.example.com/data"),
 	))
-	
+
 	// 外部APIコールをエミュレート
 	time.Sleep(apiLatency)
-	
+
 	// 外部APIコールの完了をイベントとして記録
 	span.AddEvent("External API call completed", trace.WithAttributes(
 		attribute.Int("api.status_code", 200),
 	))
-	
+
 	// 処理時間を計測
 	duration := time.Since(startTime).Seconds()
-	
+
 	// ヒストグラムメトリクスに記録
 	if histogram != nil {
 		histogram.Record(ctx, duration, metric.WithAttributes(
@@ -331,7 +341,7 @@ func callExternalAPI(w http.ResponseWriter, r *http.Request) {
 		))
 		log.Printf("Recorded API call duration: %.3fs", duration)
 	}
-	
+
 	// レスポンスを返す
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -449,7 +459,7 @@ func allocateMemory(w http.ResponseWriter, r *http.Request) {
 
 	// メモリを割り当てる（10MB〜50MBのランダムな量）
 	allocation := int64(10*1024*1024) + int64(rand.Intn(40*1024*1024))
-	
+
 	heapUsageMutex.Lock()
 	currentHeapUsage += allocation
 	if currentHeapUsage > 500*1024*1024 {
@@ -458,16 +468,16 @@ func allocateMemory(w http.ResponseWriter, r *http.Request) {
 	heapUsage := currentHeapUsage
 	heapUsageMutex.Unlock()
 
-	log.Printf("Memory allocated: %.2f MB, total heap: %.2f MB", 
+	log.Printf("Memory allocated: %.2f MB, total heap: %.2f MB",
 		float64(allocation)/(1024*1024), float64(heapUsage)/(1024*1024))
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	data, _ := json.Marshal(map[string]interface{}{
-		"action":      "allocate",
-		"allocated_mb": float64(allocation) / (1024 * 1024),
+		"action":        "allocate",
+		"allocated_mb":  float64(allocation) / (1024 * 1024),
 		"total_heap_mb": float64(heapUsage) / (1024 * 1024),
-		"message":     "Memory allocated",
+		"message":       "Memory allocated",
 	})
 	w.Write(data)
 }
@@ -478,7 +488,7 @@ func freeMemory(w http.ResponseWriter, r *http.Request) {
 
 	// メモリを解放する（10MB〜50MBのランダムな量）
 	deallocation := int64(10*1024*1024) + int64(rand.Intn(40*1024*1024))
-	
+
 	heapUsageMutex.Lock()
 	currentHeapUsage -= deallocation
 	if currentHeapUsage < 10*1024*1024 {
@@ -487,16 +497,16 @@ func freeMemory(w http.ResponseWriter, r *http.Request) {
 	heapUsage := currentHeapUsage
 	heapUsageMutex.Unlock()
 
-	log.Printf("Memory freed: %.2f MB, total heap: %.2f MB", 
+	log.Printf("Memory freed: %.2f MB, total heap: %.2f MB",
 		float64(deallocation)/(1024*1024), float64(heapUsage)/(1024*1024))
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	data, _ := json.Marshal(map[string]interface{}{
-		"action":      "free",
-		"freed_mb":    float64(deallocation) / (1024 * 1024),
+		"action":        "free",
+		"freed_mb":      float64(deallocation) / (1024 * 1024),
 		"total_heap_mb": float64(heapUsage) / (1024 * 1024),
-		"message":     "Memory freed",
+		"message":       "Memory freed",
 	})
 	w.Write(data)
 }
@@ -626,7 +636,7 @@ func main() {
 			activeConnectionsMutex.Lock()
 			connections := activeConnections
 			activeConnectionsMutex.Unlock()
-			
+
 			o.Observe(connections, metric.WithAttributes(
 				attribute.String("connection.type", "http"),
 			))
@@ -667,7 +677,7 @@ func main() {
 			heapUsageMutex.Lock()
 			heapUsage := currentHeapUsage
 			heapUsageMutex.Unlock()
-			
+
 			o.Observe(heapUsage, metric.WithAttributes(
 				attribute.String("memory.state", "used"),
 			))
@@ -699,7 +709,7 @@ func main() {
 				currentHeapUsage = 500 * 1024 * 1024
 			}
 			heapUsageMutex.Unlock()
-			log.Printf("Simulated heap memory change: %+.2f MB, total: %.2f MB", 
+			log.Printf("Simulated heap memory change: %+.2f MB, total: %.2f MB",
 				float64(change)/(1024*1024), float64(currentHeapUsage)/(1024*1024))
 		}
 	}()
